@@ -1,19 +1,17 @@
 #!/bin/sh
 
-version_number="4.10.6"
+version_number="4.11.0"
 
 # UI
 
 external_menu() {
-    [ "$use_external_menu" = "1" ] && rofi "$1" -sort -dmenu -i -width 1500 -p "$2" "$3"
-    [ "$use_external_menu" = "2" ] && dmenu -l 20 -p "$2"
+    rofi "$1" -sort -dmenu -i -width 1500 -p "$2" "$3"
 }
 
 launcher() {
     [ "$use_external_menu" = "0" ] && [ -z "$1" ] && set -- "+m" "$2"
     [ "$use_external_menu" = "0" ] && fzf "$1" --reverse --cycle --prompt "$2"
     [ "$use_external_menu" = "1" ] && external_menu "$1" "$2" "$external_menu_args"
-    [ "$use_external_menu" = "2" ] && external_menu "$1" "$2"
 }
 
 nth() {
@@ -74,8 +72,6 @@ help_info() {
         Play dubbed version
       --rofi
         Use rofi instead of fzf for the interactive menu
-      --dmenu
-        Use dmenu instead of fzf for the interactive menu
       --skip
         Use ani-skip to skip the intro of the episode (mpv only)
       --no-detach
@@ -86,6 +82,8 @@ help_info() {
         Use given title as ani-skip query
       -N, --nextep-countdown
         Display a countdown to the next episode
+      -R, --random
+        Browse random anime (discover mode)
       -U, --update
         Update the script
     Some example usages:
@@ -233,6 +231,14 @@ get_episode_url() {
     fi
 }
 
+# fetch a random/discovery list of anime (random page of top anime)
+random_anime() {
+    #shellcheck disable=SC2016
+    random_gql='query( $search: SearchInput $limit: Int $page: Int $translationType: VaildTranslationTypeEnumType $countryOrigin: VaildCountryOriginEnumType ) { shows( search: $search limit: $limit page: $page translationType: $translationType countryOrigin: $countryOrigin ) { edges { _id name availableEpisodes __typename } }}'
+    rand_page=$(($(od -An -N2 -tu2 /dev/urandom | tr -d ' ') % 30 + 1))
+    curl -e "$allanime_refr" -s -G "${allanime_api}/api" --data-urlencode "variables={\"search\":{\"allowAdult\":false,\"allowUnknown\":false,\"sortBy\":\"Top\"},\"limit\":26,\"page\":${rand_page},\"translationType\":\"$mode\",\"countryOrigin\":\"JP\"}" --data-urlencode "query=$random_gql" -A "$agent" | sed 's|Show|\n|g' | sed -nE "s|.*_id\":\"([^\"]*).*\"name\":\"(.+)\".*${mode}\":\"?([1-9][^,]*).*|\1\t\2 (\3 episodes)|p" | sed 's/\\"//g'
+}
+
 # search the query and give results
 search_anime() {
     #shellcheck disable=SC2016
@@ -351,7 +357,6 @@ play_episode() {
     unset episode
     update_history
     [ "$use_external_menu" = "1" ] && wait
-    [ "$use_external_menu" = "2" ] && wait
 }
 
 play() {
@@ -406,8 +411,7 @@ external_menu_normal_window="${ANI_CLI_EXTERNAL_MENU_NORMAL_WINDOW:-0}"
 skip_intro="${ANI_CLI_SKIP_INTRO:-0}"
 # shellcheck disable=SC2154
 skip_title="$ANI_CLI_SKIP_TITLE"
-[ -t 0 ] || (command -v dmenu && use_external_menu=2)
-[ -t 0 ] || (command -v rofi && use_external_menu=1)
+[ -t 0 ] || use_external_menu=1
 hist_dir="${ANI_CLI_HIST_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ani-cli}"
 [ ! -d "$hist_dir" ] && mkdir -p "$hist_dir"
 histfile="$hist_dir/ani-hsts"
@@ -472,7 +476,6 @@ while [ $# -gt 0 ]; do
         --no-detach) no_detach=1 ;;
         --exit-after-play) exit_after_play=1 && no_detach=1 ;;
         --rofi) use_external_menu=1 ;;
-        --dmenu) use_external_menu=2 ;;
         --skip) skip_intro=1 ;;
         --skip-title)
             [ $# -lt 2 ] && die "missing argument!"
@@ -480,6 +483,7 @@ while [ $# -gt 0 ]; do
             shift
             ;;
         -N | --nextep-countdown) search=nextep ;;
+        -R | --random) search=random ;;
         -U | --update) update_script ;;
         *) query="$(printf "%s" "$query $1" | sed "s|^ ||;s| |+|g")" ;;
     esac
@@ -503,6 +507,20 @@ esac
 
 # searching
 case "$search" in
+    random)
+        printf "\33[2K\r\033[1;35mFetching random anime to discover...\033[0m\n"
+        anime_list=$(random_anime)
+        [ -z "$anime_list" ] && die "Could not fetch anime list!"
+        result=$(printf "%s" "$anime_list" | nl -w 2 | sed 's/^[[:space:]]//')
+        result=$(printf "%s" "$result" | nth "Discover anime: ")
+        [ -z "$result" ] && exit 1
+        title=$(printf "%s" "$result" | cut -f2)
+        allanime_title="$(printf "%s" "$title" | cut -d'(' -f1 | tr -d '[:punct:]')"
+        id=$(printf "%s" "$result" | cut -f1)
+        ep_list=$(episodes_list "$id")
+        [ -z "$ep_no" ] && ep_no=$(printf "%s" "$ep_list" | nth "Select episode: " "$multi_selection_flag")
+        [ -z "$ep_no" ] && exit 1
+        ;;
     history)
         anime_list=$(while read -r ep_no id title; do process_hist_entry & done <"$histfile")
         wait
